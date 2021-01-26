@@ -7,5 +7,171 @@ output: html_document
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(here)
+library(lubridate)
+library(tsibble) # time series tibbles
+library(feasts) # wrangling and working with time series data
+library(slider) # finding moving averages
+```
+
+## Read in the data
+
+```{r}
+toolik <- read_csv(here("data", "toolikweather.csv")) # date is a character initially
+  
+
+
+```
+
+
+### Convert this into a tsibble
+
+```{r}
+toolik_ts <- toolik %>% 
+  mutate(date = lubridate::mdy(date)) %>% # first convert it into a date class that R understands
+  as_tsibble(key = NULL, #  key would be stations or different sites if you had them
+             index = date) 
+
+
+ggplot(data = toolik_ts, aes(x = date, y = mean_airtemp)) + 
+  geom_line() + 
+  theme_classic()
+
+```
+
+## Use `index_by()` function to aggregate time series information by intervals we specify (timeseries equivalent of group_by())
+
+First calculate average monthly temperature
+
+```{r}
+toolik_month <- toolik_ts %>% 
+  index_by(yr_mo = ~yearmonth(.)) %>% # this is applied to both year and month (yearmonth) and to the whole specified vector (.)
+  summarize(monthly_mean_temp = mean(mean_airtemp, na.rm = TRUE))
+
+ggplot(data = toolik_month, aes(x = yr_mo, y = monthly_mean_temp)) +
+  geom_line() + 
+  facet_wrap(~month(yr_mo, label = TRUE))
+# COOL! Can still pull out year/month from yr_mo using lubridate functions
+```
+
+Aggregate by week:
+
+```{r}
+toolik_weekly <- toolik_ts %>% 
+  index_by(weekly = ~yearweek(.)) %>% # yearweek etc. are built in syntax--look them up
+  summarize(weekly_airtemp = mean(mean_airtemp, na.rm = TRUE),
+    min_airtemp = min(mean_airtemp))
+
+head(toolik_weekly)
+```
+## Filtering time series
+
+This is the time series equivalent of filtering. Use `filter_index()` to specify ranges of time series to keep or exclude.
+
+```{r}
+# filter between start of June 2000 to end of Oct 2001
+toolik_ts %>% 
+  filter_index("2000-06" ~ "2001-10")
+```
+Can filter at a higher resolution, too
+
+```{r}
+# Ap 10 to May 5
+toolik_ts %>% 
+  filter_index("2006-04-10" ~ "2006-05-15")
+
+# check out different filter_index() options
+```
+
+## Seasonplots
+
+```{r}
+toolik_ts %>% 
+  filter(year(date) > 2014) %>% # this is the same as filter_index with 2015 ~ . (dot would be end of the dataset)
+  gg_season(y = mean_airtemp)
+
+# can also do it monthly
+toolik_month %>% 
+  gg_season(y = monthly_mean_temp) + # probably want to make it a continuous color scale since the numbers mean things
+  theme_light()
+
+```
+
+
+## Seasonal subseries plot
+
+Allows you to break up subseries (like facet_wrapping, but a bit easier)
+
+```{r}
+toolik_month %>% 
+  gg_subseries(monthly_mean_temp) # like what we did before, but a little cleaner and has month across all months
+
+```
+
+## Find the moving average using `slider` package
+
+```{r}
+set.seed(2021)
+test <- rnorm(n = 100, mean = 40, sd = 10)
+
+# see different windows
+slide(test, ~.x, .before = 2, .after = 2) # across all values of the vector, creates a window of 5 (2 before, 2 after)
+# first ones don't have all 5 because don't have 2 before/2 after
+# this pulls all the values and puts it in a list--want to convert it to a numeric vector to use it for graphing
+
+
+```
+Rolling (moving average) for windows of size 15
+
+```{r}
+roll_toolik_15 <- toolik_ts %>% 
+  mutate(ma_15d = as.numeric(slide(toolik_ts$mean_airtemp, # variable to use
+                                   mean, # function to apply
+                                   .before = 7, # window size (doesn't include center value). In this case it's days
+                                   .after = 7)))
+
+
+# plot it
+ggplot() +
+  geom_line(data = toolik_ts, aes(x = date,
+                                  y = mean_airtemp), size = 0.2, color = "grey") + # original data
+  # add moving average
+  geom_line(data = roll_toolik_15, aes(x = date, y = ma_15d)) + # slightly smoother (larger windows will give smoother results)
+  theme_minimal()
+```
+
+## Create autocorrelation function (ACF)
+
+How observations are correlated with prior observations within the same variable
+
+```{r}
+# start with days
+toolik_ts %>% 
+  ACF(mean_airtemp) %>% # part of feasts package--this gives you the values
+  autoplot() # this is if the lag is days
+# see observations are pretty highly correlated (i.e. days within a month of each other are pretty correlated)
+# BUT seasonality is probably better represented with months
+
+toolik_month %>% 
+  ACF(monthly_mean_temp) %>% 
+  autoplot() # see clear and reflected seasonality now in the ACF (lag on x-axis is in month and see observations 12 months apart are strongly correlated whereas those 6 months apart are strongly negatively correlated)
+# also see many years back the correlation is still very strong (not a lot of dampening happening)
+```
+
+## Time series decomposition by STL
+
+This is a type better than classical decomposition: STL (seasonal trend and loess). Similar: have seasonal, trend, and remainder components
+
+```{r}
+toolik_dec <- toolik_month %>% 
+  model(STL(monthly_mean_temp ~ season(window = Inf))) # Inf window means the same window as X (month)
+
+# pull seasonal trend and remainder from model
+components(toolik_dec) %>% 
+  autoplot()
+# first panel is original, second is trend, third is seasonality, fourth is residual
+# NEED TO LOOK AT THE SCALES! First panel has a range of ~40, trend has a very small y-axis (4, or 10% of change we see in the total data)--probably not that important
+# seasonality on the other hand is on a large scale--seasonality is a huge part of this time series (range of like 30!)
 ```
 
